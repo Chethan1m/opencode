@@ -430,6 +430,8 @@ export type McpProtocol = "legacy" | "auto" | "2026-07-28"
 
 export type ConfigWorktree = { directory: string }
 
+export type ConfigModelCapabilities = { tools?: boolean; input?: Array<string>; output?: Array<string> }
+
 export type ConfigShellOption = { path: string; name: string; acceptable: boolean }
 
 export type SessionMessageLocationSwitched = {
@@ -2130,7 +2132,7 @@ export type ConfigEntry =
                 settings?: ConfigModelSettings
                 headers?: { [x: string]: string }
                 body?: { [x: string]: JsonValue }
-                capabilities?: { tools?: boolean; input?: Array<string>; output?: Array<string> }
+                capabilities?: ConfigModelCapabilities
                 variants?: Array<{
                   id: string
                   settings?: ConfigModelSettings

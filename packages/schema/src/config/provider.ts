@@ -2,7 +2,7 @@ export * as ConfigProvider from "./provider.js"
 
 import { Schema } from "effect"
 import { Money } from "../money.js"
-import { Compatibility, Family, ID, VariantID } from "../model.js"
+import { Capabilities, Compatibility, Family, ID, VariantID } from "../model.js"
 import { Provider } from "../provider.js"
 import { optional } from "../schema.js"
 
@@ -59,13 +59,6 @@ class Cost extends Schema.Class<Cost>("Config.Model.Cost")({
   cache: Cache.pipe(optional),
 }) {}
 
-// Partial: unset fields fall back to the existing/base model's capabilities or Model.Capabilities.default().
-class ModelCapabilities extends Schema.Class<ModelCapabilities>("Config.Model.Capabilities")({
-  tools: Schema.Boolean.pipe(optional),
-  input: Schema.Array(Schema.String).pipe(optional),
-  output: Schema.Array(Schema.String).pipe(optional),
-}) {}
-
 class Limit extends Schema.Class<Limit>("Config.Model.Limit")({
   context: Schema.Int.pipe(optional),
   input: Schema.Int.pipe(optional),
@@ -79,7 +72,14 @@ class Model extends Schema.Class<Model>("Config.Model")({
   compatibility: Compatibility.pipe(optional),
   package: Schema.String.pipe(optional),
   ...ModelOverlays,
-  capabilities: ModelCapabilities.pipe(optional),
+  // Partial: unset fields fall back to the base model's capabilities, then the defaults.
+  capabilities: Capabilities.mapFields((fields) => ({
+    tools: optional(fields.tools),
+    input: optional(fields.input),
+    output: optional(fields.output),
+  }))
+    .annotate({ identifier: "Config.Model.Capabilities" })
+    .pipe(optional),
   variants: Schema.Struct({
     id: VariantID,
     ...ModelOverlays,
