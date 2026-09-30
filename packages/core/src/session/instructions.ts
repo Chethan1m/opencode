@@ -8,7 +8,6 @@ import { FSUtil } from "@opencode/util/fs-util"
 import { Location } from "../location.js"
 import { SessionEvent } from "./event.js"
 import { MessageDecodeError } from "./error.js"
-import { SessionMessage } from "./message.js"
 import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
 
@@ -38,8 +37,8 @@ const layer = Layer.effect(
     const root = yield* fs.resolve(location.project.directory)
     // Same-step parallel reads settle concurrently, so an in-memory claim guards each
     // Session/path pair while a load is in flight. The claim is released once the load
-    // settles: the synthetic message metadata scanned below is the only lasting ledger,
-    // so paths whose synthetics drop out of model-visible history (compaction, revert)
+    // settles: message metadata scanned below is the only lasting ledger,
+    // so paths whose instructions drop out of model-visible history (compaction, revert)
     // are re-discovered and re-injected instead of staying silently lost.
     const inFlight = yield* Ref.make<Map<SessionSchema.ID, Set<string>>>(new Map())
 
@@ -101,11 +100,16 @@ function previouslyInjected(store: SessionStore.Interface, sessionID: SessionSch
     const history = yield* store.context(sessionID)
     return new Set(
       history
-        .filter((message): message is SessionMessage.Synthetic => message.type === "synthetic")
+        .flatMap((message) => {
+          if (message.type === "synthetic") return [message.metadata]
+          if (message.type !== "assistant") return []
+          return message.content.flatMap((part) =>
+            part.type === "tool" && part.state.status === "completed" ? [part.state.metadata] : [],
+          )
+        })
         .flatMap(
-          (message) =>
-            Option.getOrUndefined(Schema.decodeUnknownOption(InjectedMetadata)(message.metadata))?.instruction.paths ??
-            [],
+          (metadata) =>
+            Option.getOrUndefined(Schema.decodeUnknownOption(InjectedMetadata)(metadata))?.instruction.paths ?? [],
         ),
     )
   })

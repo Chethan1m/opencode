@@ -89,11 +89,46 @@ const identity = {
   agent: Agent.ID.make("build"),
   messageID: SessionMessage.ID.make("msg_nearby"),
 }
-const readCall = (sessionID: Session.ID, id: string, readPath: string): Parameters<Tool.Snapshot["execute"]>[0] => ({
+const readCall = (
+  sessionID: Session.ID,
+  id: string,
+  readPath: string,
+  page: ReadToolFileSystem.PageInput = {},
+): Parameters<Tool.Snapshot["execute"]>[0] => ({
   sessionID,
   ...identity,
-  call: { type: "tool-call", id, name: "read", input: { path: readPath } },
+  call: { type: "tool-call", id, name: "read", input: { path: readPath, ...page } },
 })
+
+const recordRead = (sessionID: Session.ID, readPath: string, page: ReadToolFileSystem.PageInput = {}) =>
+  Effect.gen(function* () {
+    const bus = yield* Bus.Service
+    const registry = yield* Tool.Service
+    const tools = yield* registry.snapshot()
+    const assistantMessageID = SessionMessage.ID.create()
+    const tool = { sessionID, assistantMessageID, id: "call-read" }
+    yield* bus.publish(SessionEvent.Step.Started, {
+      sessionID,
+      assistantMessageID,
+      agent: identity.agent,
+      model: { id: Model.ID.make("model"), providerID: Provider.ID.make("provider") },
+      started: 0,
+    })
+    yield* bus.publish(SessionEvent.Tool.Input.Started, { ...tool, name: "read" })
+    yield* bus.publish(SessionEvent.Tool.Called, { ...tool, input: { path: readPath, ...page }, executed: false })
+    const result = yield* tools.execute({
+      ...readCall(sessionID, tool.id, readPath, page),
+      messageID: assistantMessageID,
+    })
+    if (!result.content[0]) return yield* Effect.die(new Error("Read returned no content"))
+    yield* bus.publish(SessionEvent.Tool.Success, {
+      ...tool,
+      content: [result.content[0]],
+      metadata: result.metadata,
+      executed: false,
+    })
+    return result
+  })
 
 const writeAgents = (file: string, content: string) => Effect.promise(() => fs.writeFile(file, content))
 const mkdir = (dir: string) => Effect.promise(() => fs.mkdir(dir, { recursive: true }))
@@ -130,23 +165,22 @@ describe("SessionInstructions", () => {
       yield* mkdir(path.dirname(otherPath))
       yield* writeAgents(rootPath, "root-instructions")
       yield* writeAgents(subPath, "sub-instructions")
-      yield* writeAgents(deepPath, "deep-instructions")
+      yield* writeAgents(deepPath, "deep-instructions\nmore rules")
       yield* writeAgents(otherPath, "other-instructions")
-      yield* Effect.promise(() => fs.writeFile(path.resolve(dir, "sub", "deep", "file.txt"), "file content"))
       yield* Effect.promise(() => fs.writeFile(path.resolve(dir, "sub", "other", "file2.txt"), "file content 2"))
 
       const session = yield* Session.Service
       const registry = yield* Tool.Service
       const sessionID = (yield* session.create({ location: Location.Ref.make({ directory: dir }) })).id
 
-      // A read deep under sub/ discovers deep and sub AGENTS.md, walking up to but
-      // excluding the Location root (already supplied by core initial instructions).
-      yield* executeTool(registry, readCall(sessionID, "call-deep", "sub/deep/file.txt"))
+      // A partial instruction read still loads the complete rules and its parents.
+      const partial = yield* executeTool(registry, readCall(sessionID, "call-deep", "sub/deep/AGENTS.md", { limit: 1 }))
+      expect(partial.metadata).toEqual({ truncated: true })
 
       const firstInjected = yield* synthetics(sessionID)
       expect(firstInjected).toHaveLength(1)
       expect(firstInjected[0]!.text).toBe(
-        `Instructions from: ${deepPath}\ndeep-instructions\n\nInstructions from: ${subPath}\nsub-instructions`,
+        `Instructions from: ${deepPath}\ndeep-instructions\nmore rules\n\nInstructions from: ${subPath}\nsub-instructions`,
       )
       expect(firstInjected[0]!.description).toBe(
         `Loaded ${path.relative(dir, deepPath)}, ${path.relative(dir, subPath)}`,
@@ -165,6 +199,13 @@ describe("SessionInstructions", () => {
       expect(secondInjected[1]!.description).toBe(`Loaded ${path.relative(dir, otherPath)}`)
       expect(secondInjected[1]!.metadata).toEqual({ instruction: { paths: [otherPath] } })
       expect(secondInjected.some((message) => message.text.includes("root-instructions"))).toBe(false)
+
+      // A full-file response can still shorten long lines; it must not claim complete instructions.
+      yield* writeAgents(otherPath, "x".repeat(2_001))
+      const clippedSessionID = (yield* session.create({ location: Location.Ref.make({ directory: dir }) })).id
+      const clipped = yield* executeTool(registry, readCall(clippedSessionID, "call-clipped", "sub/other/AGENTS.md"))
+      expect(clipped.metadata?.instruction).toBeUndefined()
+      expect((yield* synthetics(clippedSessionID))[0]?.text).toContain("x".repeat(2_001))
     }),
   )
 
@@ -176,7 +217,7 @@ describe("SessionInstructions", () => {
       const subPath = path.resolve(dir, "sub", "AGENTS.md")
       yield* mkdir(path.resolve(dir, "sub"))
       yield* writeAgents(rootPath, "root-instructions")
-      yield* writeAgents(subPath, "sub-instructions")
+      yield* writeAgents(subPath, "sub-instructions\r\n\r\n")
       yield* Effect.promise(() => fs.writeFile(path.resolve(dir, "sub", "file.txt"), "content"))
 
       const session = yield* Session.Service
@@ -192,6 +233,18 @@ describe("SessionInstructions", () => {
 
       // The durable claim on the prior synthetic prevents re-injection; no new synthetic.
       expect(yield* synthetics(sessionID)).toHaveLength(1)
+
+      yield* Effect.forEach([{}, { offset: 1, limit: 10 }], (page) =>
+        Effect.gen(function* () {
+          const readSessionID = (yield* session.create({ location: Location.Ref.make({ directory: dir }) })).id
+          const result = yield* recordRead(readSessionID, "sub/AGENTS.md", page)
+          expect(result.metadata).toEqual({ truncated: false, instruction: { paths: [subPath] } })
+          expect(yield* synthetics(readSessionID)).toHaveLength(0)
+
+          yield* executeTool(registry, readCall(readSessionID, "call-sub", "sub/file.txt"))
+          expect(yield* synthetics(readSessionID)).toHaveLength(0)
+        }),
+      )
     }),
   )
 
@@ -246,11 +299,12 @@ describe("SessionInstructions", () => {
       const bus = yield* Bus.Service
       const sessionID = (yield* session.create({ location: Location.Ref.make({ directory: dir }) })).id
 
-      yield* executeTool(registry, readCall(sessionID, "call-before", "sub/file.txt"))
-      expect(yield* synthetics(sessionID)).toHaveLength(1)
+      const result = yield* recordRead(sessionID, "sub/AGENTS.md")
+      expect(result.metadata?.instruction).toEqual({ paths: [subPath] })
+      expect(yield* synthetics(sessionID)).toHaveLength(0)
 
       // A completed compaction truncates model-visible history at its boundary, dropping
-      // the synthetic that carried sub's instructions.
+      // the read result that carried sub's instructions.
       yield* bus.publish(SessionEvent.Compaction.Started, { sessionID, reason: "manual", recent: "" })
       yield* bus.publish(SessionEvent.Compaction.Ended, { sessionID, reason: "manual", text: "summary", recent: "" })
       expect(yield* synthetics(sessionID)).toHaveLength(0)
