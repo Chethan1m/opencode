@@ -84,18 +84,10 @@ export const Plugin = {
               // directory listing the walk starts at the directory itself (so its own AGENTS.md
               // is discovered); for a file it starts at the file's dirname. External reads are
               // skipped, and discovery failures never fail the read.
-              const instruction = yield* Effect.gen(function* () {
+              yield* Effect.gen(function* () {
                 if (result.target.externalDirectory !== undefined) return
                 const resolved = yield* fs.resolve(result.target.absolute)
                 const root = yield* fs.resolve(location.directory)
-                // Read output can shorten individual lines without marking the page truncated.
-                // Only claim instructions when the returned text matches the complete file.
-                const text = basename(result.target.absolute) === FILENAME ? completeText(result.content) : undefined
-                const provided =
-                  text !== undefined &&
-                  (yield* fs.readFileStringSafe(resolved))?.replaceAll("\r\n", "\n").replace(/\n$/, "") === text
-                    ? resolved
-                    : undefined
                 // The Location and its ancestors are already supplied by initial instructions,
                 // even when an upward walk from elsewhere in the project cannot reach root.
                 const discovered = yield* fs.up({
@@ -104,14 +96,13 @@ export const Plugin = {
                   stop: root,
                 })
                 const candidates = (yield* Effect.forEach(discovered, fs.resolve)).filter(
-                  (file) => !FSUtil.contains(dirname(file), root) && file !== provided,
+                  (file) => !FSUtil.contains(dirname(file), root) && file !== resolved,
                 )
-                if (candidates.length > 0)
-                  yield* sessionInstructions.load({ sessionID: context.sessionID, paths: candidates })
-                return provided
+                if (candidates.length === 0) return
+                yield* sessionInstructions.load({ sessionID: context.sessionID, paths: candidates })
               }).pipe(
-                Effect.catch(() => Effect.undefined),
-                Effect.catchDefect(() => Effect.undefined),
+                Effect.catch(() => Effect.void),
+                Effect.catchDefect(() => Effect.void),
               )
               if (
                 result.content.type === "file" &&
@@ -119,15 +110,12 @@ export const Plugin = {
                 !ReadToolFileSystem.MEDIA_MIMES.has(result.content.mime)
               )
                 return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource: result.target.resource }))
-              return { output: result.content, path: result.path, instruction }
+              return { output: result.content, path: result.path }
             }).pipe(
               Effect.map((result) => ({
                 output: result.output,
                 content: toModelContent(result.path, input.offset, result.output),
-                metadata: {
-                  truncated: result.output.type === "file" ? false : result.output.truncated,
-                  ...(result.instruction ? { instruction: { paths: [result.instruction] } } : {}),
-                },
+                metadata: { truncated: result.output.type === "file" ? false : result.output.truncated },
               })),
               Effect.mapError((error) => {
                 if (error instanceof ToolFailure) return error
@@ -181,12 +169,6 @@ export const Plugin = {
       return yield* new ToolFailure({ message })
     })
   }),
-}
-
-function completeText(output: typeof Output.Type) {
-  if (output.type === "file" && output.encoding === "utf8")
-    return output.content.replaceAll("\r\n", "\n").replace(/\n$/, "")
-  if (output.type === "text-page" && output.offset === 1 && !output.truncated) return output.content
 }
 
 export const toModelContent = (path: string, offset: number | undefined, output: typeof Output.Type) => {
