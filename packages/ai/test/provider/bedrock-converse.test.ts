@@ -501,25 +501,23 @@ describe("Bedrock Converse route", () => {
         LLM.request({ model, messages: [Message.assistant([call])], cache: "none" }),
       )
 
-      expect(prepared.body.messages).toEqual([
-        {
-          role: "assistant",
-          content: [
-            {
-              toolUse: {
-                toolUseId: "tool_1",
-                name: "edit",
-                input: {
-                  path: "file.ts",
-                  edits: [{ oldText: "a", newText: "b" }, null, true, 7, "text", ["kept", { nested: { value: "ok" } }]],
-                  nested: { empty: {}, onlyEmpty: {} },
-                  " ": "preserve whitespace key",
-                },
+      expect(prepared.body.messages[0]).toEqual({
+        role: "assistant",
+        content: [
+          {
+            toolUse: {
+              toolUseId: "tool_1",
+              name: "edit",
+              input: {
+                path: "file.ts",
+                edits: [{ oldText: "a", newText: "b" }, null, true, 7, "text", ["kept", { nested: { value: "ok" } }]],
+                nested: { empty: {}, onlyEmpty: {} },
+                " ": "preserve whitespace key",
               },
             },
-          ],
-        },
-      ])
+          },
+        ],
+      })
       expect(input).toEqual(original)
       expect(call.input).toBe(input)
     }),
@@ -540,15 +538,13 @@ describe("Bedrock Converse route", () => {
         }),
       )
 
-      expect(prepared.body.messages).toEqual([
-        {
-          role: "assistant",
-          content: [
-            { toolUse: { toolUseId: "tool_empty_key", name: "first", input: {} } },
-            { toolUse: { toolUseId: "tool_empty_object", name: "second", input: {} } },
-          ],
-        },
-      ])
+      expect(prepared.body.messages[0]).toEqual({
+        role: "assistant",
+        content: [
+          { toolUse: { toolUseId: "tool_empty_key", name: "first", input: {} } },
+          { toolUse: { toolUseId: "tool_empty_object", name: "second", input: {} } },
+        ],
+      })
     }),
   )
 
@@ -1099,6 +1095,12 @@ describe("Bedrock Converse route", () => {
             { toolUse: { toolUseId: "call_1", name: "lookup", input: {} } },
           ],
         },
+        {
+          role: "user",
+          content: [
+            { toolResult: { toolUseId: "call_1", content: [{ text: "Tool result missing" }], status: "error" } },
+          ],
+        },
       ])
     }),
   )
@@ -1301,11 +1303,11 @@ describe("Bedrock Converse route", () => {
           ),
         ),
       )
-      expect(response.events.filter((event) => event.type === "reasoning-delta" && event.text === "").at(-1)).toEqual({
-        type: "reasoning-delta",
+      expect(response.events.filter((event) => event.type === "reasoning-delta")).toEqual([])
+      expect(response.events.find((event) => event.type === "reasoning-start")).toEqual({
+        type: "reasoning-start",
         id: "reasoning-0",
-        text: "",
-        providerMetadata: { bedrock: { redactedData } },
+        providerMetadata: undefined,
       })
       expect(response.events.find((event) => event.type === "reasoning-end")).toEqual({
         type: "reasoning-end",
@@ -1383,6 +1385,13 @@ describe("Bedrock Converse route", () => {
         ),
       )
 
+      expect(response.events.filter((event) => event.type === "reasoning-delta")).toEqual([])
+      expect(response.events.find((event) => event.type === "reasoning-end")).toEqual({
+        type: "reasoning-end",
+        id: "reasoning-0",
+        providerMetadata: { bedrock: { redactedData: "AQID" } },
+        text: undefined,
+      })
       expect(response.message.content).toEqual([
         { type: "reasoning", text: "", providerMetadata: { bedrock: { redactedData: "AQID" } } },
       ])
