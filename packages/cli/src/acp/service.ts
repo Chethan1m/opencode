@@ -40,6 +40,7 @@ import { OPENCODE_VERSION } from "../version"
 import type { ACPCatalog, Catalog } from "./catalog"
 import { configOptions, currentModel, DEFAULT_VARIANT_VALUE, parseModelSelection } from "./config-option"
 import type { ACPConnection } from "./connection"
+import { ACPDirectories } from "./directories"
 import { ACPError } from "./error"
 import { ACPPromise } from "./promise"
 import type { ACPSessions, Attached } from "./sessions"
@@ -170,7 +171,7 @@ export function make(input: {
           loadSession: true,
           mcpCapabilities: { http: true, sse: false },
           promptCapabilities: { embeddedContext: true, image: true },
-          sessionCapabilities: { close: {}, delete: {}, fork: {}, list: {}, resume: {} },
+          sessionCapabilities: { additionalDirectories: {}, close: {}, delete: {}, fork: {}, list: {}, resume: {} },
           _meta: { [ACPTranslate.ChildSessionUpdatesCapability]: true },
         },
         authMethods: [authMethod],
@@ -183,17 +184,23 @@ export function make(input: {
       return {}
     }),
     newSession: Effect.fnUntraced(function* (params) {
+      const directories = yield* ACPDirectories.parse(params.cwd, params.additionalDirectories)
       // Load before creating so a catalog failure leaves no session behind. Agent and model stay unset
       // so the server resolves its defaults after plugins activate.
       yield* input.catalog.get(params.cwd)
       const created = yield* ACPPromise.promise(() =>
-        input.client.session.create({ location: { directory: params.cwd } }),
+        input.client.session.create({
+          location: { directory: params.cwd },
+          ...(directories.length > 0 ? { permissions: ACPDirectories.rules(directories) } : {}),
+        }),
       )
       const attached = yield* input.sessions.attach(created, params.cwd, params.mcpServers)
       return { sessionId: attached.id, configOptions: yield* currentOptions(attached) }
     }),
     loadSession: Effect.fnUntraced(function* (params) {
+      const directories = yield* ACPDirectories.parse(params.cwd, params.additionalDirectories)
       const session = yield* getSession(params.sessionId, params.cwd)
+      yield* ACPDirectories.activate(input.client, session, directories)
       const attached = yield* input.sessions.attach(session, session.location.directory, params.mcpServers)
       yield* replay(attached)
       return { configOptions: yield* currentOptions(attached) }
@@ -208,12 +215,16 @@ export function make(input: {
         }),
       )
       return {
-        sessions: page.data.map((session) => ({
-          sessionId: session.id,
-          cwd: session.location.directory,
-          title: withTimestampedFallback(session),
-          updatedAt: new Date(session.time.updated).toISOString(),
-        })),
+        sessions: page.data.map((session) => {
+          const additionalDirectories = ACPDirectories.list(session.permissions)
+          return {
+            sessionId: session.id,
+            cwd: session.location.directory,
+            ...(additionalDirectories.length > 0 ? { additionalDirectories } : {}),
+            title: withTimestampedFallback(session),
+            updatedAt: new Date(session.time.updated).toISOString(),
+          }
+        }),
         ...(page.cursor.next ? { nextCursor: page.cursor.next } : {}),
       }
     }),
@@ -227,7 +238,9 @@ export function make(input: {
       return {}
     }),
     resumeSession: Effect.fnUntraced(function* (params) {
+      const directories = yield* ACPDirectories.parse(params.cwd, params.additionalDirectories)
       const session = yield* getSession(params.sessionId, params.cwd)
+      yield* ACPDirectories.activate(input.client, session, directories)
       const attached = yield* input.sessions.attach(session, session.location.directory, params.mcpServers ?? [])
       return { configOptions: yield* currentOptions(attached) }
     }),
@@ -237,7 +250,10 @@ export function make(input: {
       return {}
     }),
     forkSession: Effect.fnUntraced(function* (params) {
+      const directories = yield* ACPDirectories.parse(params.cwd, params.additionalDirectories)
       const forked = yield* ACPPromise.promise(() => input.client.session.fork({ sessionID: params.sessionId }))
+      // Forks copy the source session's rules, so the request list replaces any inherited grants.
+      yield* ACPDirectories.activate(input.client, forked, directories)
       const attached = yield* input.sessions.attach(forked, forked.location.directory, params.mcpServers ?? [])
       yield* replay(attached)
       return { sessionId: attached.id, configOptions: yield* currentOptions(attached) }
