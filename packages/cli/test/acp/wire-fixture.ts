@@ -61,11 +61,13 @@ const SyntheticBody = Schema.Struct({
 const Permissions = Schema.Array(
   Schema.Struct({ action: Schema.String, resource: Schema.String, effect: Schema.Literals(["allow", "deny", "ask"]) }),
 )
+const Metadata = Schema.Record(Schema.String, Schema.MutableJson)
 const CreateBody = Schema.Struct({
   location: Schema.Struct({ directory: Schema.String }),
   permissions: Schema.optional(Permissions),
+  metadata: Schema.optional(Metadata),
 })
-const UpdateBody = Schema.Struct({ permissions: Schema.optional(Permissions) })
+const UpdateBody = Schema.Struct({ permissions: Schema.optional(Permissions), metadata: Schema.optional(Metadata) })
 const ModelBody = Schema.Struct({
   model: Schema.Struct({ providerID: Schema.String, id: Schema.String, variant: Schema.optional(Schema.String) }),
 })
@@ -689,6 +691,7 @@ function startServer(options: WireOptions, changed: () => void) {
             data: createSession({
               ...makeSession("", { cwd: input.location.directory }),
               ...(input.permissions ? { permissions: [...input.permissions] } : {}),
+              ...(input.metadata ? { metadata: input.metadata } : {}),
             }),
           }),
         ),
@@ -705,6 +708,7 @@ function startServer(options: WireOptions, changed: () => void) {
           const session = fake.sessions.get(req.params.sessionID)
           if (!session) return notFound(req.params.sessionID)
           if (input.permissions) session.permissions = [...input.permissions]
+          if (input.metadata) session.metadata = input.metadata
           return noContent()
         }),
       },

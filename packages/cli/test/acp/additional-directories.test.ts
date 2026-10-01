@@ -1,12 +1,19 @@
 import { describe, expect, test } from "bun:test"
+import fs from "node:fs/promises"
+import path from "node:path"
 import type { PermissionRule } from "@opencode/client/promise"
+import { tmpdir } from "../fixture/tmpdir"
 import { makeSession, rpcError, startWire, type Wire } from "./wire-fixture"
+
+const key = "opencode.acp.additionalDirectories"
 
 const grant = (directory: string): PermissionRule => ({
   action: "external_directory",
-  resource: `${directory}/**`,
+  resource: `${directory}/*`,
   effect: "allow",
 })
+
+const userGrant: PermissionRule = { action: "external_directory", resource: "/x/**", effect: "allow" }
 
 const other: PermissionRule[] = [
   { action: "read", resource: "*.secret", effect: "deny" },
@@ -17,14 +24,6 @@ const updates = (acp: Wire) =>
   acp.server.requests.filter((request) => request.method === "PATCH" && request.path.startsWith("/api/session/"))
 
 describe("acp additional directories over the wire", () => {
-  test("initialize advertises additional directories", async () => {
-    await using acp = await startWire()
-
-    const result = await acp.initialize()
-
-    expect(result.agentCapabilities?.sessionCapabilities?.additionalDirectories).toEqual({})
-  })
-
   test("session/new grants normalized unique directories other than cwd and lists them", async () => {
     await using acp = await startWire()
     await acp.initialize()
@@ -35,15 +34,43 @@ describe("acp additional directories over the wire", () => {
       mcpServers: [],
     })
 
-    expect(acp.server.sessions.get(created.sessionId)?.permissions).toEqual([
-      grant("/shared/lib"),
-      grant("/product-docs"),
-    ])
+    expect(acp.server.sessions.get(created.sessionId)).toMatchObject({
+      permissions: [grant("/shared/lib"), grant("/product-docs")],
+      metadata: { [key]: ["/shared/lib", "/product-docs"] },
+    })
     expect((await acp.request("session/list", { cwd: "/workspace" })).sessions).toEqual([
       expect.objectContaining({
         sessionId: created.sessionId,
         additionalDirectories: ["/shared/lib", "/product-docs"],
       }),
+    ])
+  })
+
+  test("grants both the written and real spelling of a symlinked root and drops links to cwd", async () => {
+    await using tmp = await tmpdir()
+    const root = await fs.realpath(tmp.path)
+    const cwd = path.join(root, "workspace")
+    const shared = path.join(root, "shared")
+    await Promise.all([fs.mkdir(cwd), fs.mkdir(shared)])
+    await Promise.all([
+      fs.symlink(shared, path.join(root, "shared-link")),
+      fs.symlink(cwd, path.join(root, "workspace-link")),
+    ])
+    await using acp = await startWire()
+    await acp.initialize()
+
+    const created = await acp.request("session/new", {
+      cwd,
+      additionalDirectories: [path.join(root, "workspace-link"), path.join(root, "shared-link")],
+      mcpServers: [],
+    })
+
+    expect(acp.server.sessions.get(created.sessionId)).toMatchObject({
+      permissions: [grant(path.join(root, "shared-link")), grant(shared)],
+      metadata: { [key]: [path.join(root, "shared-link")] },
+    })
+    expect((await acp.request("session/list", { cwd })).sessions[0]?.additionalDirectories).toEqual([
+      path.join(root, "shared-link"),
     ])
   })
 
@@ -66,11 +93,12 @@ describe("acp additional directories over the wire", () => {
     },
   )
 
-  test("load and resume replace ACP grants with the requested list and keep other session rules", async () => {
+  test("load and resume replace ACP grants and keep other session rules and metadata", async () => {
     await using acp = await startWire()
     acp.server.sessions.set("ses_saved", {
       ...makeSession("ses_saved"),
-      permissions: [grant("/old"), ...other],
+      metadata: { host: "tui", [key]: ["/old"] },
+      permissions: [grant("/old"), userGrant, ...other],
     })
     await acp.initialize()
 
@@ -80,11 +108,10 @@ describe("acp additional directories over the wire", () => {
       additionalDirectories: ["/shared/lib", "/product-docs"],
       mcpServers: [],
     })
-    expect(acp.server.sessions.get("ses_saved")?.permissions).toEqual([
-      grant("/shared/lib"),
-      grant("/product-docs"),
-      ...other,
-    ])
+    expect(acp.server.sessions.get("ses_saved")).toMatchObject({
+      metadata: { host: "tui", [key]: ["/shared/lib", "/product-docs"] },
+      permissions: [grant("/shared/lib"), grant("/product-docs"), userGrant, ...other],
+    })
 
     await acp.request("session/resume", {
       cwd: "/workspace",
@@ -94,7 +121,8 @@ describe("acp additional directories over the wire", () => {
     expect(updates(acp)).toHaveLength(1)
 
     await acp.request("session/resume", { cwd: "/workspace", sessionId: "ses_saved" })
-    expect(acp.server.sessions.get("ses_saved")?.permissions).toEqual(other)
+    expect(acp.server.sessions.get("ses_saved")?.metadata).toEqual({ host: "tui" })
+    expect(acp.server.sessions.get("ses_saved")?.permissions).toEqual([userGrant, ...other])
     expect((await acp.request("session/list", { cwd: "/workspace" })).sessions[0]).not.toHaveProperty(
       "additionalDirectories",
     )
@@ -102,7 +130,11 @@ describe("acp additional directories over the wire", () => {
 
   test("forks replace inherited grants with the requested list", async () => {
     await using acp = await startWire()
-    acp.server.sessions.set("ses_source", { ...makeSession("ses_source"), permissions: [grant("/old"), ...other] })
+    acp.server.sessions.set("ses_source", {
+      ...makeSession("ses_source"),
+      metadata: { [key]: ["/old"] },
+      permissions: [grant("/old"), ...other],
+    })
     await acp.initialize()
 
     const plain = await acp.request("session/fork", { cwd: "/workspace", sessionId: "ses_source" })
@@ -112,14 +144,21 @@ describe("acp additional directories over the wire", () => {
       additionalDirectories: ["/shared/lib"],
     })
 
-    expect(acp.server.sessions.get(plain.sessionId)?.permissions).toEqual(other)
-    expect(acp.server.sessions.get(granted.sessionId)?.permissions).toEqual([grant("/shared/lib"), ...other])
+    expect(acp.server.sessions.get(plain.sessionId)).toMatchObject({ metadata: {}, permissions: other })
+    expect(acp.server.sessions.get(granted.sessionId)).toMatchObject({
+      metadata: { [key]: ["/shared/lib"] },
+      permissions: [grant("/shared/lib"), ...other],
+    })
     expect(acp.server.sessions.get("ses_source")?.permissions).toEqual([grant("/old"), ...other])
   })
 
-  test("leaves session permissions alone without additional directories", async () => {
+  test("leaves sessions alone without additional directories", async () => {
     await using acp = await startWire()
-    acp.server.sessions.set("ses_saved", { ...makeSession("ses_saved"), permissions: other })
+    acp.server.sessions.set("ses_saved", {
+      ...makeSession("ses_saved"),
+      metadata: { host: "tui" },
+      permissions: [userGrant, ...other],
+    })
     await acp.initialize()
 
     const created = await acp.request("session/new", { cwd: "/workspace", mcpServers: [] })
@@ -127,9 +166,13 @@ describe("acp additional directories over the wire", () => {
     await acp.request("session/resume", { cwd: "/workspace", sessionId: "ses_saved", additionalDirectories: [] })
 
     const create = acp.server.requests.find((request) => request.method === "POST" && request.path === "/api/session")
-    expect(create?.body).not.toHaveProperty("permissions")
+    expect(create?.body).toEqual({ location: { directory: "/workspace" } })
     expect(acp.server.sessions.get(created.sessionId)?.permissions).toBeUndefined()
-    expect(acp.server.sessions.get("ses_saved")?.permissions).toEqual(other)
     expect(updates(acp)).toEqual([])
+    expect(
+      (await acp.request("session/list", { cwd: "/workspace" })).sessions.map(
+        (session) => session.additionalDirectories,
+      ),
+    ).toEqual([undefined, undefined])
   })
 })

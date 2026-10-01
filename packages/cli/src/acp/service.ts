@@ -191,7 +191,7 @@ export function make(input: {
       const created = yield* ACPPromise.promise(() =>
         input.client.session.create({
           location: { directory: params.cwd },
-          ...(directories.length > 0 ? { permissions: ACPDirectories.rules(directories) } : {}),
+          ...ACPDirectories.grant(directories),
         }),
       )
       const attached = yield* input.sessions.attach(created, params.cwd, params.mcpServers)
@@ -216,7 +216,7 @@ export function make(input: {
       )
       return {
         sessions: page.data.map((session) => {
-          const additionalDirectories = ACPDirectories.list(session.permissions)
+          const additionalDirectories = ACPDirectories.list(session)
           return {
             sessionId: session.id,
             cwd: session.location.directory,

@@ -30,7 +30,8 @@ describe("acp additional directories subprocess", () => {
   test("tools read files in an additional directory without an external directory ask", async () => {
     const target = { file: "" }
     await using fixture = await createAcpFixture({ respond: readingModel(() => target.file) })
-    const shared = path.join(await fs.realpath(fixture.root), "shared")
+    // Keep the unresolved tmpdir spelling, which differs from the real path on macOS.
+    const shared = path.join(fixture.root, "shared")
     target.file = path.join(shared, "notes.txt")
     await fs.mkdir(shared)
     await Bun.write(target.file, "shared root content\n")
@@ -38,7 +39,7 @@ describe("acp additional directories subprocess", () => {
     await initialize(acp)
     const session = expectOk(
       await acp.request<NewSessionResponse>("session/new", {
-        cwd: await fs.realpath(fixture.home),
+        cwd: fixture.home,
         additionalDirectories: [shared],
         mcpServers: [],
       }),
