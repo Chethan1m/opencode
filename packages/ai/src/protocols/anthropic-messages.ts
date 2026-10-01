@@ -992,13 +992,13 @@ const lowerMessages = Effect.fn("AnthropicMessages.lowerMessages")(function* (
   return messages
 })
 
+// Per-turn effort started with Claude Opus 5 and every Claude 5.1 model; later versions of any family inherit it.
 const supportsEffortUpdates = (model: LLMRequest["model"]) => {
   const override = model.compatibility?.supportsEffortUpdates
   if (override !== undefined) return override
   const version = claudeVersion(model.id)
   if (version === undefined) return false
-  if (version.family === "opus") return version.major >= 5
-  if (version.family !== "fable" && version.family !== "mythos") return false
+  if (version.family === "opus" && version.major >= 5) return true
   return version.major > 5 || (version.major === 5 && version.minor >= 1)
 }
 
