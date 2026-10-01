@@ -683,6 +683,36 @@ describe("AzurePlugin", () => {
     )
   })
 
+  it.live("names models after their deployments and keeps catalog models that Azure spells differently", () =>
+    withAzure(
+      () =>
+        Response.json({
+          data: [
+            // Azure compares names without case and may return another case than the one created.
+            { id: "GPT-5-Nano", model: "gpt-5-nano", status: "succeeded" },
+            // A deployment named after another model is still the model it deploys.
+            { id: "gpt-5", model: "gpt-5-mini", status: "succeeded" },
+            // Azure's model name differs from the catalog, as with `gpt-4` for GPT-4 Turbo.
+            { id: "deepseek-v4-flash", model: "DeepSeek-V4-Flash-2026", status: "succeeded" },
+            { id: "ft-legal", model: "gpt-4o-mini.ft-123", status: "succeeded" },
+          ],
+        }),
+      ({ endpoints }) =>
+        Effect.gen(function* () {
+          yield* seedCatalog
+          yield* keyCredential
+          yield* addPlugin(endpoints)
+
+          const deployed = yield* eventually(azureModels, (list) => list.length === 3)
+          expect(deployed.map((model) => [model.id, model.modelID, model.name, model.limit.context])).toEqual([
+            [Model.ID.make("deepseek-v4-flash"), Model.ID.make("deepseek-v4-flash"), "DeepSeek-V4-Flash", 200_000],
+            [Model.ID.make("gpt-5"), Model.ID.make("gpt-5"), "GPT-5 Mini (gpt-5)", 400_000],
+            [Model.ID.make("gpt-5-nano"), Model.ID.make("GPT-5-Nano"), "GPT-5 Nano", 300_000],
+          ])
+        }),
+    ),
+  )
+
   it.live("keeps deployment IDs when another deployment of the same model is removed", () => {
     const inventory = { names: ["nano-a", "nano-b"] }
     return withAzure(

@@ -317,12 +317,13 @@ export function make(
         )
           return
         if (JSON.stringify(found) === JSON.stringify(loaded.deployments)) return
-        const catalog = new Set(
-          Array.from((yield* providers.snapshot()).records.get(Provider.ID.azure)?.models.keys() ?? [], (id) =>
+        const catalog = new Map(
+          Array.from((yield* providers.snapshot()).records.get(Provider.ID.azure)?.models.keys() ?? [], (id) => [
             id.toLowerCase(),
-          ),
+            id,
+          ]),
         )
-        const unmatched = found.filter((deployment) => !catalog.has(deployment.model.toLowerCase()))
+        const unmatched = found.filter((deployment) => !catalogModel(catalog, deployment))
         if (unmatched.length > 0)
           yield* Effect.logWarning("Azure deployments of models outside the catalog need explicit configuration", {
             deployments: unmatched.map((deployment) => deployment.name),
@@ -498,23 +499,30 @@ function resourceQuery(resource: string) {
   ].join(" ")
 }
 
-// Azure addresses a model by its deployment name, while limits, costs, and routes belong to the catalog model it
-// deploys. A deployment of a model the catalog does not know has none of those and is left to explicit configuration.
+// A deployment's ID is its name, while limits, costs, and routes come from the catalog model it deploys. Azure compares
+// names without case and may return another case, so IDs are lowercase like the catalog's.
 function deployedModels(deployments: readonly Deployment[], catalog: readonly Model.MutableInfo[]) {
   const models = new Map(catalog.map((model) => [model.id.toLowerCase(), model]))
-  return deployments.reduce((result, deployment) => {
-    const model = models.get(deployment.model.toLowerCase())
-    if (!model) return result
-    // A deployment's ID must not depend on which other deployments happen to exist.
-    const id = deployment.name.toLowerCase() === model.id.toLowerCase() ? model.id : Model.ID.make(deployment.name)
-    if (result.has(id)) return result
-    return result.set(id, {
-      ...structuredClone(model),
-      id,
-      modelID: Model.ID.make(deployment.name),
-      name: id === model.id ? model.name : `${model.name} (${deployment.name})`,
-    })
-  }, new Map<Model.ID, Model.MutableInfo>())
+  return new Map(
+    deployments.flatMap((deployment) => {
+      const model = catalogModel(models, deployment)
+      if (!model) return []
+      const id = Model.ID.make(deployment.name.toLowerCase())
+      const info: Model.MutableInfo = {
+        ...structuredClone(model),
+        id,
+        modelID: Model.ID.make(deployment.name),
+        name: id === model.id.toLowerCase() ? model.name : `${model.name} (${deployment.name})`,
+      }
+      return [[id, info] as const]
+    }),
+  )
+}
+
+// Azure spells some models unlike the catalog, such as `gpt-4` for GPT-4 Turbo. A deployment named after a catalog
+// model then stands for that model, as it did before discovery; any other is left to explicit configuration.
+function catalogModel<T>(models: ReadonlyMap<string, T>, deployment: Deployment) {
+  return models.get(deployment.model.toLowerCase()) ?? models.get(deployment.name.toLowerCase())
 }
 
 function responsesWebSocketCapable(provider: Provider.Info) {

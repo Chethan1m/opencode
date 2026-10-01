@@ -293,9 +293,13 @@ switching accounts. To pick up a deployment added later, restart OpenCode or con
 - Switching accounts never shows the previous account's inventory; the new account starts from the whole catalog.
 - Deployments inherit limits, costs, and capabilities from their catalog models.
 
-Deployment names are their model IDs. A name matching its catalog model, ignoring case, keeps the catalog ID;
-other names appear as IDs such as `azure/gpt-production`. These IDs stay stable when other deployments are added or
-removed.
+Deployment names are their model IDs, in lowercase because Azure ignores case in names, for example
+`azure/gpt-production`. A deployment named after its model, such as `gpt-5-mini`, keeps the catalog ID. These IDs stay
+stable when other deployments are added or removed.
+
+OpenCode matches a deployment to the catalog by the model it deploys, or by its name when Azure spells the model
+differently, as with `gpt-4` for GPT-4 Turbo. A deployment named after another model, such as `gpt-5` deploying
+`gpt-5-mini`, shows that model's name, limits, and costs.
 
 With the Azure CLI, OpenCode lists deployments through the Azure management API, which needs read access to the
 resource. If that fails, and always with an API key, it uses the resource's legacy deployment inventory. Discovery reads
