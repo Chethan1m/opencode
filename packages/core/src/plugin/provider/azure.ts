@@ -20,7 +20,9 @@ const cognitiveScope = "https://cognitiveservices.azure.com/.default"
 const foundryScope = "https://ai.azure.com/.default"
 const managementScope = "https://management.azure.com/.default"
 const methodID = Integration.MethodID.make("azure-cli")
-// A resource name becomes a hostname label and a query literal, so anything else never leaves the process.
+// A resource name becomes a hostname label and a query literal, so anything else never leaves the process. Azure
+// allows only letters, digits, and hyphens in it.
+// https://learn.microsoft.com/azure/ai-services/cognitive-services-custom-subdomains
 const resourcePattern = /^[a-zA-Z0-9][a-zA-Z0-9-]*$/
 const decodeJSON = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))
 const decodeToken = Schema.decodeUnknownEffect(
@@ -184,6 +186,7 @@ export function make(
       })
 
       // Resource Graph searches every subscription the Azure CLI account can read, not only the selected one.
+      // https://learn.microsoft.com/rest/api/azureresourcegraph/resourcegraph/resources/resources
       const findResource = Effect.fn("AzurePlugin.findResource")(function* (resource: string) {
         const response = yield* HttpClientRequest.post(
           `${endpoints.management}/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01`,
@@ -209,6 +212,7 @@ export function make(
             Effect.timeout("10 seconds"),
             Effect.flatMap((response) =>
               // Every page carries the management token, so a page link must stay on the management endpoint.
+              // https://learn.microsoft.com/rest/api/aiservices/accountmanagement/deployments/list
               response.nextLink !== undefined && URL.parse(response.nextLink)?.origin !== origin
                 ? Effect.fail(new Error("Azure returned a deployment page outside the management endpoint"))
                 : Effect.succeed([
@@ -255,13 +259,16 @@ export function make(
           )
       })
 
-      // Azure documents the management API as the deployment inventory, but only an Azure CLI session can reach it.
-      // The resource's legacy inventory serves API keys and identities without Azure Resource Manager read access.
+      // Azure documents the management API as the deployment inventory, but only an Azure CLI session can reach it:
+      // Azure Resource Manager accepts Entra ID tokens, never resource keys.
+      // https://learn.microsoft.com/rest/api/aiservices/accountmanagement/deployments/list
+      // The resource's own inventory serves API keys and identities without Azure Resource Manager read access. Only
+      // data-plane version 2022-12-01 has it; later versions dropped `/deployments` and keep `/models`, which lists
+      // models the resource can deploy rather than its deployments.
+      // https://github.com/Azure/azure-rest-api-specs/blob/main/specification/cognitiveservices/data-plane/OpenAIAuthoring/stable/2022-12-01/azureopenai.json
       const deployments = (url: string, resource: string, credential: Credential.Value) =>
         credential.type === "oauth"
-          ? managementDeployments(resource).pipe(
-              Effect.catch(() => resourceDeployments(url, credential)),
-            )
+          ? managementDeployments(resource).pipe(Effect.catch(() => resourceDeployments(url, credential)))
           : resourceDeployments(url, credential)
 
       // Local and quick, so a switch rebinds the provider before discovery for the new connection calls Azure.
@@ -492,6 +499,7 @@ function resourceQuery(resource: string) {
     "| where type =~ 'microsoft.cognitiveservices/accounts' and kind in~ ('AIServices', 'OpenAI')",
     // The custom subdomain is the resource name of every endpoint, and Entra ID authentication requires one.
     // Subdomains are globally unique, so a name matches at most one resource.
+    // https://learn.microsoft.com/azure/ai-services/cognitive-services-custom-subdomains
     "| extend resourceName = tostring(properties.customSubDomainName)",
     `| where resourceName =~ '${resource}'`,
     "| project id",
@@ -501,6 +509,7 @@ function resourceQuery(resource: string) {
 
 // A deployment's ID is its name, while limits, costs, and routes come from the catalog model it deploys. Azure compares
 // names without case and may return another case, so IDs are lowercase like the catalog's.
+// https://learn.microsoft.com/azure/azure-resource-manager/management/resource-name-rules
 function deployedModels(deployments: readonly Deployment[], catalog: readonly Model.MutableInfo[]) {
   const models = new Map(catalog.map((model) => [model.id.toLowerCase(), model]))
   return new Map(
@@ -519,8 +528,10 @@ function deployedModels(deployments: readonly Deployment[], catalog: readonly Mo
   )
 }
 
-// Azure spells some models unlike the catalog, such as `gpt-4` for GPT-4 Turbo. A deployment named after a catalog
-// model then stands for that model, as it did before discovery; any other is left to explicit configuration.
+// Azure spells some models unlike the catalog: a model name plus a separate version, such as `gpt-4` for GPT-4 Turbo,
+// `gpt-35-turbo`, or mixed case such as `DeepSeek-V4-Flash`. A deployment named after a catalog model then stands for
+// that model, as it did before discovery; any other is left to explicit configuration.
+// https://learn.microsoft.com/azure/foundry/openai/concepts/retired-models
 function catalogModel<T>(models: ReadonlyMap<string, T>, deployment: Deployment) {
   return models.get(deployment.model.toLowerCase()) ?? models.get(deployment.name.toLowerCase())
 }
